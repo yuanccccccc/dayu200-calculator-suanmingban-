@@ -1,11 +1,16 @@
 /**
- * 简易计算器 + 赛博算命 - DAYU200 / OpenHarmony 4.0 (API 9 兼容)
+ * 简易计算器 - DAYU200 / OpenHarmony 4.0 (API 9 兼容)
  * 主页面: entry/src/main/ets/pages/Index.ets
  *
- * 算命模式（方案 B：板子独立运行）：
- * 输入 8 位生日 YYYYMMDD + 男/女，按「占」
- * -> 本地排盘（移植 bazi-mcp/tyme4ts，见 ets/libs/）
- * -> 直连 DeepSeek API 生成解读，无需 PC 中转
+ * 隐藏彩蛋：赛博算命（界面上无任何入口）
+ *   计算器状态下直接键入：
+ *     10 位「生日+时辰」如 2005031703 = 2005-03-17 03时
+ *     或 12 位「生日+时分」如 200503170257 = 2005-03-17 02:57
+ *   按 = 触发：本地排盘（ets/libs/ 移植 bazi-mcp/tyme4ts）
+ *     -> 直连 DeepSeek 生成命书批文 -> 全屏阅读页展示。
+ *   键入 8 位以上纯数字时按 % 可切换乾造(男)/坤造(女)，默认乾造。
+ *   阅读页点正文可放大/缩小字号，按 C 或点 × 返回计算器。
+ *   其余任何输入（含 8 位纯数字）都按普通计算器处理，完全无痕。
  */
 import http from '@ohos.net.http'
 import { calcBazi, BaziLite } from '../libs/baziapi'
@@ -49,18 +54,20 @@ interface DSRespError {
 @Component
 struct Index {
   @State display: string = '0'
-  // 算命模式状态
-  @State mode: string = 'calc' // 'calc' | 'fortune'
-  @State birth: string = '' // 8位生日 YYYYMMDD
-  @State gender: number = 0 // 0男 1女
-  @State baziShort: string = '' // 八字简述（结果顶部展示）
-  @State fortuneText: string = '' // 解读正文；'' 表示尚未出结果
+  @State hint: string = '' // 橙色小字：挂起运算 / 乾坤指示 / 推演进度 / 错误提示
+  @State gender: number = 0 // 0男(乾造) 1女(坤造)，隐藏开关：% 键在输入 8 位以上数字时切换
+  @State baziShort: string = ''
+  @State fortuneText: string = ''
   @State busy: boolean = false
+  @State fullView: boolean = false // 结果全屏阅读页
+  @State bigFont: boolean = false // 阅读页字号（点正文切换）
+  @State elapsed: number = 0 // 推演已用时（秒），等待期间显示在提示行
   private firstOperand: number = 0
   private pendingOp: string = ''
   private waitingForSecond: boolean = false
+  private timerId: number = -1
 
-  // ---------------- 计算器逻辑（原有） ----------------
+  // ---------------- 计算器逻辑 ----------------
   private calc(a: number, b: number, op: string): number {
     switch (op) {
       case '+': return a + b
@@ -84,26 +91,23 @@ struct Index {
     return parseFloat(this.display)
   }
 
-  // ---------------- 输入处理（双模式） ----------------
+  // ---------------- 隐藏触发识别 ----------------
+  // 纯数字 10 位（生日+时辰）或 12 位（生日+时分）且构成合法日期时间 -> 返回时辰 0-23；否则 -1
+  private parsePattern(s: string): number {
+    if (!/^\d{10}$|^\d{12}$/.test(s)) return -1
+    let y = parseInt(s.slice(0, 4))
+    let m = parseInt(s.slice(4, 6))
+    let d = parseInt(s.slice(6, 8))
+    let hh = parseInt(s.slice(8, 10))
+    if (y < 1901 || y > 2099 || m < 1 || m > 12 || d < 1 || d > 31) return -1
+    if (isNaN(hh) || hh > 23) return -1
+    if (s.length === 12 && parseInt(s.slice(10, 12)) > 59) return -1
+    return hh
+  }
+
+  // ---------------- 输入处理 ----------------
   private inputDigit(d: string) {
-    if (this.mode === 'fortune') {
-      if (this.busy) return
-      if (this.fortuneText !== '') { // 已有结果，重新开始输入
-        this.fortuneText = ''
-        this.baziShort = ''
-        this.birth = ''
-      }
-      if (this.birth.length < 8) { // 前 8 位：生日
-        this.birth += d
-      } else if (this.birth.length === 8) { // 第 9 位：时辰十位（24 小时制）
-        if (parseInt(d) > 2) this.birth += '0' // 输 3-9 自动补 0：按 5 视作 05
-        this.birth += d
-      } else if (this.birth.length === 9) { // 第 10 位：时辰个位
-        if (this.birth[8] === '2' && parseInt(d) > 3) return // 24-29 非法，不接收
-        this.birth += d
-      }
-      return
-    }
+    if (this.busy || this.fullView) return
     if (this.display === '错误' || this.waitingForSecond) {
       this.display = d
       this.waitingForSecond = false
@@ -115,7 +119,7 @@ struct Index {
   }
 
   private inputDot() {
-    if (this.mode === 'fortune') return
+    if (this.busy || this.fullView) return
     if (this.display === '错误' || this.waitingForSecond) {
       this.display = '0.'
       this.waitingForSecond = false
@@ -125,7 +129,7 @@ struct Index {
   }
 
   private setOp(op: string) {
-    if (this.mode === 'fortune') return
+    if (this.busy || this.fullView) return
     if (this.pendingOp !== '' && !this.waitingForSecond) {
       // 连续运算: 先算出前面的结果
       let r = this.calc(this.firstOperand, this.current(), this.pendingOp)
@@ -136,12 +140,18 @@ struct Index {
     }
     this.pendingOp = op
     this.waitingForSecond = true
+    this.hint = this.format(this.firstOperand) + ' ' + op
   }
 
   private equals() {
-    if (this.mode === 'fortune') {
-      this.goFortune() // 算命模式下 = 也触发占卜
-      return
+    if (this.busy || this.fullView) return
+    // 隐藏彩蛋：没有挂起运算时，10/12 位合法日期时间 -> 算命；其余一律按普通等号
+    if (this.pendingOp === '') {
+      let hour = this.parsePattern(this.display)
+      if (hour >= 0) {
+        this.goFortune(hour)
+        return
+      }
     }
     if (this.pendingOp === '') return
     let r = this.calc(this.firstOperand, this.current(), this.pendingOp)
@@ -149,106 +159,61 @@ struct Index {
     this.pendingOp = ''
     this.firstOperand = 0
     this.waitingForSecond = true
+    this.hint = ''
   }
 
   private clearAll() {
-    if (this.mode === 'fortune') {
-      this.birth = ''
-      this.fortuneText = ''
-      this.baziShort = ''
+    if (this.busy) return
+    if (this.fullView) { // 阅读页按 C = 关闭并清场
+      this.closeFortune()
       return
     }
     this.display = '0'
+    this.hint = ''
     this.firstOperand = 0
     this.pendingOp = ''
     this.waitingForSecond = false
   }
 
   private backspace() {
-    if (this.mode === 'fortune') {
-      if (this.busy || this.fortuneText !== '') return
-      this.birth = this.birth.length > 0 ? this.birth.slice(0, -1) : ''
-      return
-    }
+    if (this.busy || this.fullView) return
     if (this.display === '错误' || this.waitingForSecond) return
     this.display = this.display.length > 1 ? this.display.slice(0, -1) : '0'
   }
 
-  // ---------------- 赛博算命 ----------------
-  private toggleMode() {
-    if (this.busy) return
-    if (this.mode === 'calc') {
-      this.mode = 'fortune'
-      this.birth = ''
-      this.fortuneText = ''
-      this.baziShort = ''
-    } else {
-      this.mode = 'calc'
-      this.display = '0'
-    }
-  }
-
-  private toggleGender() {
-    if (this.mode !== 'fortune' || this.busy) return
-    this.gender = this.gender === 0 ? 1 : 0
-  }
-
-  // 1995082014 -> '1995-08-20 14时'，不足位时显示已输入部分
-  private birthDisplay(): string {
-    let s = this.birth
-    if (s === '') return ''
-    let y = s.slice(0, 4)
-    let m = s.length > 4 ? s.slice(4, 6) : ''
-    let d = s.length > 6 ? s.slice(6, 8) : ''
-    let h = s.length > 8 ? s.slice(8, 10) : ''
-    let out = y
-    if (s.length >= 5) out += '-' + m
-    if (s.length >= 7) out += '-' + d
-    if (s.length >= 9) out += ' ' + h + (s.length === 10 ? '时' : '?')
-    return out
-  }
-
-  private goFortune() {
-    if (this.mode !== 'fortune' || this.busy) return
-    if (this.birth.length !== 8 && this.birth.length !== 10) {
-      this.fortuneText = '请输入 8 位生日（如 19950820），可再加 2 位时辰（24 小时制，如 09、21）；不输时辰则随机定。'
-      return
-    }
-    let y = parseInt(this.birth.slice(0, 4))
-    let m = parseInt(this.birth.slice(4, 6))
-    let d = parseInt(this.birth.slice(6, 8))
-    if (y < 1901 || y > 2099 || m < 1 || m > 12 || d < 1 || d > 31) {
-      this.fortuneText = '日期不合法，请检查后重输。'
-      return
-    }
-    // 时辰：输满 10 位用输入值；只输 8 位则现场随机拈一个（古人"时辰不知，以卜定之"）
-    let hour = 12
-    let hourNote = ''
-    if (this.birth.length === 10) {
-      hour = parseInt(this.birth.slice(8, 10))
-      if (isNaN(hour) || hour > 23) {
-        this.fortuneText = '时辰不合法（应为 00-23），请检查后重输。'
-        return
-      }
-    } else {
-      hour = Math.floor(Math.random() * 24)
-      hourNote = `求测者不知出生时辰，现场拈得${hour}时，时柱由此而定。时柱可以照常推演，但涉及时柱的断语措辞宜留三分余地。`
-    }
-    this.busy = true
+  private closeFortune() {
+    this.fullView = false
+    this.fortuneText = ''
     this.baziShort = ''
-    this.fortuneText = '正在排盘……'
+    this.display = '0'
+    this.hint = ''
+    this.bigFont = false
+  }
+
+  // ---------------- 赛博算命（隐藏） ----------------
+  private goFortune(hour: number) {
+    let y = parseInt(this.display.slice(0, 4))
+    let m = parseInt(this.display.slice(4, 6))
+    let d = parseInt(this.display.slice(6, 8))
+    this.busy = true
+    this.elapsed = 0
+    this.hint = '推演中 0s'
+    this.timerId = setInterval(() => {
+      this.elapsed += 1
+      this.hint = `推演中 ${this.elapsed}s`
+    }, 1000)
 
     // 1. 本地排盘（无网络，毫秒级）
     let b: BaziLite
     try {
       b = calcBazi(y, m, d, hour, this.gender)
     } catch (e) {
+      this.stopTimer()
       this.busy = false
-      this.fortuneText = '排盘失败：' + (e as Error).message
+      this.hint = '排盘失败'
       return
     }
     this.baziShort = b.baziShort
-    this.fortuneText = '八字已排好，正在请 DeepSeek 天师解读……'
 
     // 2. 直连 DeepSeek（系统指令 = 子平典籍方法论 + 谶语批文表达，防止术语堆砌与万金油套话）
     let sys = '你是一位以《子平真诠》《穷通宝鉴》《滴天髓》《神峰通考》为方法论根基的老命师，为人写命书批文。你推演时用最严的专业功夫，落笔时如江湖先生断命——谶语判词起句，白话点破收尾，玄之又玄又句句有据。\n' +
@@ -282,7 +247,7 @@ struct Index {
       {
         role: 'user',
         content: `以下是求测者排盘与本地推演结论（你的推演依据，正文不得直接引用其中的行话与数字）：
-${b.summary}${hourNote ? '\n注：' + hourNote : ''}
+${b.summary}
 
 请按系统指令为此命写一纸批文：推演以上述骨架为准并逐项对照成格破格，但落笔时全部转译成谶语判词加白话点破，行话与评分数字不得出现在正文。`
       }
@@ -306,23 +271,34 @@ ${b.summary}${hourNote ? '\n注：' + hourNote : ''}
       readTimeout: 120000
     }).then((resp: http.HttpResponse) => {
       client.destroy()
+      this.stopTimer()
       this.busy = false
       if (resp.responseCode !== 200) {
-        this.fortuneText = 'DeepSeek HTTP ' + resp.responseCode
+        this.hint = '解读失败 HTTP ' + resp.responseCode
         return
       }
       let r = JSON.parse(String(resp.result)) as DSResp
       let text = r.choices && r.choices.length > 0 && r.choices[0].message ? r.choices[0].message.content : undefined
       if (text) {
         this.fortuneText = text
+        this.fullView = true // 直接进全屏阅读页
+        this.hint = ''
       } else {
-        this.fortuneText = '解读失败：' + (r.error && r.error.message ? r.error.message : '返回为空')
+        this.hint = '解读失败：' + (r.error && r.error.message ? r.error.message : '返回为空')
       }
     }).catch((e: Error) => {
       client.destroy()
+      this.stopTimer()
       this.busy = false
-      this.fortuneText = '网络错误：' + (e.message || '无法连接 DeepSeek（板子需可上外网）')
+      this.hint = '网络错误：' + (e.message || '无法连接 DeepSeek（板子需可上外网）')
     })
+  }
+
+  private stopTimer() {
+    if (this.timerId >= 0) {
+      clearInterval(this.timerId)
+      this.timerId = -1
+    }
   }
 
   // ---------------- UI ----------------
@@ -339,46 +315,68 @@ ${b.summary}${hourNote ? '\n注：' + hourNote : ''}
   }
 
   build() {
-    Column() {
-      // 显示屏
+    if (this.fullView) {
+      // 全屏阅读页：结果不再挤在按键上方的小条里
       Column() {
-        if (this.mode === 'fortune') {
-          Text(this.baziShort !== ''
-            ? this.baziShort
-            : `赛博算命 · ${this.gender === 0 ? '乾造(男)' : '坤造(女)'} · 生日后可加 2 位时辰(24h)，缺省随机`)
-            .fontSize(20)
+        Row() {
+          Text(this.baziShort)
+            .fontSize(22)
             .fontColor('#FF9F0A')
-            .width('100%')
-            .textAlign(TextAlign.End)
-            .maxLines(2)
-          if (this.fortuneText !== '') {
-            // 结果/提示文本
-            Scroll() {
-              Text(this.fortuneText)
-                .fontSize(22)
-                .fontColor(Color.White)
-                .width('100%')
-                .lineHeight(30)
-            }
-            .scrollable(ScrollDirection.Vertical)
-            .width('100%')
             .layoutWeight(1)
-            .align(Alignment.BottomEnd)
-            .margin({ top: 8 })
-          } else {
-            Text(this.birthDisplay() !== '' ? this.birthDisplay() : '输入生日 YYYYMMDD')
-              .fontSize(this.birth.length === 8 ? 44 : 36)
-              .fontColor(this.birthDisplay() !== '' ? Color.White : '#8E8E93')
-              .width('100%')
-              .textAlign(TextAlign.End)
-              .maxLines(1)
-          }
-        } else {
-          Text(this.pendingOp ? this.format(this.firstOperand) + ' ' + this.pendingOp : ' ')
+            .maxLines(1)
+          Text('×')
+            .fontSize(30)
+            .fontColor(Color.White)
+            .width(48)
+            .height(48)
+            .textAlign(TextAlign.Center)
+            .onClick(() => this.closeFortune())
+        }
+        .width('100%')
+        .padding({ left: 20, right: 12, top: 12 })
+
+        Scroll() {
+          Text(this.fortuneText)
+            .fontSize(this.bigFont ? 34 : 25)
+            .lineHeight(this.bigFont ? 50 : 37)
+            .fontColor(Color.White)
+            .width('100%')
+        }
+        .scrollable(ScrollDirection.Vertical)
+        .layoutWeight(1)
+        .padding({ left: 20, right: 20, top: 8 })
+        .onClick(() => { this.bigFont = !this.bigFont }) // 点正文放大/缩小
+
+        Text(this.bigFont ? '点正文缩小' : '点正文放大')
+          .fontSize(14)
+          .fontColor('#666666')
+          .width('100%')
+          .textAlign(TextAlign.Center)
+          .padding({ top: 4 })
+
+        Button('C · 关闭')
+          .fontSize(20)
+          .fontColor(Color.White)
+          .backgroundColor('#A5A5A5')
+          .width('60%')
+          .height(56)
+          .borderRadius(16)
+          .margin({ top: 8, bottom: 16 })
+          .onClick(() => this.closeFortune())
+      }
+      .width('100%')
+      .height('100%')
+      .backgroundColor(Color.Black)
+    } else {
+      Column() {
+        // 显示屏
+        Column() {
+          Text(this.pendingOp !== '' ? this.hint : (this.hint !== '' ? this.hint : ' '))
             .fontSize(24)
             .fontColor('#FF9F0A')
             .width('100%')
             .textAlign(TextAlign.End)
+            .maxLines(1)
           Text(this.display)
             .fontSize(56)
             .fontColor(Color.White)
@@ -386,81 +384,60 @@ ${b.summary}${hourNote ? '\n注：' + hourNote : ''}
             .textAlign(TextAlign.End)
             .maxLines(1)
         }
-      }
-      .width('100%')
-      .padding({ left: 24, right: 24, top: 16, bottom: 12 })
-      .layoutWeight(1)
-      .justifyContent(FlexAlign.End)
+        .width('100%')
+        .padding({ left: 24, right: 24, top: 16, bottom: 12 })
+        .layoutWeight(1)
+        .justifyContent(FlexAlign.End)
 
-      // 按键区
-      Column({ space: 12 }) {
-        Row({ space: 12 }) {
-          this.btn('C', '#A5A5A5', () => this.clearAll())
-          this.btn('←', '#A5A5A5', () => this.backspace())
-          this.btn('%', '#A5A5A5', () => {
-            if (this.mode !== 'calc') return
-            let r = this.current() / 100
-            this.display = this.format(r)
-          })
-          this.btn('÷', '#FF9F0A', () => this.setOp('÷'))
+        // 按键区（纯计算器，无任何算命入口）
+        Column({ space: 12 }) {
+          Row({ space: 12 }) {
+            this.btn('C', '#A5A5A5', () => this.clearAll())
+            this.btn('←', '#A5A5A5', () => this.backspace())
+            this.btn('%', '#A5A5A5', () => {
+              if (this.busy || this.fullView) return
+              // 输入 8 位以上纯数字（疑似在敲隐藏模式）-> 切换乾造/坤造
+              if (/^\d{8,12}$/.test(this.display)) {
+                this.gender = this.gender === 0 ? 1 : 0
+                this.hint = this.gender === 0 ? '乾造(男)' : '坤造(女)'
+                return
+              }
+              let r = this.current() / 100
+              this.display = this.format(r)
+            })
+            this.btn('÷', '#FF9F0A', () => this.setOp('÷'))
+          }
+          Row({ space: 12 }) {
+            this.btn('7', '#333333', () => this.inputDigit('7'))
+            this.btn('8', '#333333', () => this.inputDigit('8'))
+            this.btn('9', '#333333', () => this.inputDigit('9'))
+            this.btn('×', '#FF9F0A', () => this.setOp('×'))
+          }
+          Row({ space: 12 }) {
+            this.btn('4', '#333333', () => this.inputDigit('4'))
+            this.btn('5', '#333333', () => this.inputDigit('5'))
+            this.btn('6', '#333333', () => this.inputDigit('6'))
+            this.btn('-', '#FF9F0A', () => this.setOp('-'))
+          }
+          Row({ space: 12 }) {
+            this.btn('1', '#333333', () => this.inputDigit('1'))
+            this.btn('2', '#333333', () => this.inputDigit('2'))
+            this.btn('3', '#333333', () => this.inputDigit('3'))
+            this.btn('+', '#FF9F0A', () => this.setOp('+'))
+          }
+          Row({ space: 12 }) {
+            this.btn('0', '#333333', () => this.inputDigit('0'))
+            this.btn('.', '#333333', () => this.inputDot())
+            this.btn('=', '#FF9F0A', () => this.equals())
+          }
         }
-        Row({ space: 12 }) {
-          this.btn('7', '#333333', () => this.inputDigit('7'))
-          this.btn('8', '#333333', () => this.inputDigit('8'))
-          this.btn('9', '#333333', () => this.inputDigit('9'))
-          this.btn('×', '#FF9F0A', () => this.setOp('×'))
-        }
-        Row({ space: 12 }) {
-          this.btn('4', '#333333', () => this.inputDigit('4'))
-          this.btn('5', '#333333', () => this.inputDigit('5'))
-          this.btn('6', '#333333', () => this.inputDigit('6'))
-          this.btn('-', '#FF9F0A', () => this.setOp('-'))
-        }
-        Row({ space: 12 }) {
-          this.btn('1', '#333333', () => this.inputDigit('1'))
-          this.btn('2', '#333333', () => this.inputDigit('2'))
-          this.btn('3', '#333333', () => this.inputDigit('3'))
-          this.btn('+', '#FF9F0A', () => this.setOp('+'))
-        }
-        Row({ space: 12 }) {
-          this.btn('0', '#333333', () => this.inputDigit('0'))
-          this.btn('.', '#333333', () => this.inputDot())
-          this.btn('=', '#FF9F0A', () => this.equals())
-        }
-        // 算命功能行（矮一排，给显示区留空间）
-        Row({ space: 12 }) {
-          Button(this.mode === 'fortune' ? '返回' : '算命')
-            .fontSize(18)
-            .fontColor(Color.White)
-            .backgroundColor('#5856D6')
-            .width('22%')
-            .height(62)
-            .borderRadius(20)
-            .onClick(() => this.toggleMode())
-          Button(this.gender === 0 ? '男' : '女')
-            .fontSize(18)
-            .fontColor(Color.White)
-            .backgroundColor(this.gender === 0 ? '#5AC8FA' : '#FF2D55')
-            .width('22%')
-            .height(62)
-            .borderRadius(20)
-            .onClick(() => this.toggleGender())
-          Button(this.busy ? '…' : '占')
-            .fontSize(22)
-            .fontColor(Color.White)
-            .backgroundColor('#FF9F0A')
-            .width('22%')
-            .height(62)
-            .borderRadius(20)
-            .onClick(() => this.goFortune())
-        }
+        .width('100%')
+        .padding({ left: 16, right: 16, bottom: 12 })
+        .justifyContent(FlexAlign.Center)
       }
       .width('100%')
-      .padding({ left: 16, right: 16, bottom: 12 })
-      .justifyContent(FlexAlign.Center)
+      .height('100%')
+      .backgroundColor(Color.Black)
     }
-    .width('100%')
-    .height('100%')
-    .backgroundColor(Color.Black)
   }
 }
