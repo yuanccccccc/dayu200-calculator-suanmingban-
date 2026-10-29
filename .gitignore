@@ -1,0 +1,14 @@
+entry/build/
+.hvigor/
+oh_modules/
+.idea/
+*.jpeg
+*.png
+*.hap
+dbg.json
+lay*.json
+verify_out/
+board-result*.txt
+extract.py
+scan8710.ps1
+local.properties
