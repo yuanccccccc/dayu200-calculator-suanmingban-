@@ -3,14 +3,17 @@
  * 主页面: entry/src/main/ets/pages/Index.ets
  *
  * 隐藏彩蛋：赛博算命（界面上无任何入口）
- *   计算器状态下直接键入：
- *     10 位「生日+时辰」如 2005031703 = 2005-03-17 03时
- *     或 12 位「生日+时分」如 200503170257 = 2005-03-17 02:57
+ *   计算器状态下键入「生日」或「生日+时辰」或「生日+时辰+分钟」：
+ *     8 位  如 20050317      = 2005-03-17（时辰不知，现场随机拈定）
+ *     10 位 如 2005031703    = 2005-03-17 03时
+ *     12 位 如 200503170257  = 2005-03-17 02:57
+ *   敲满 8 位像合法生日的数字时，橙色提示行会亮起「✦ 乾造/坤造 · 天机感应中」
+ *   等字样；退格到不像生日后装饰即刻隐去，如魔法显形/消散。
  *   按 = 触发：本地排盘（ets/libs/ 移植 bazi-mcp/tyme4ts）
- *     -> 直连 DeepSeek 生成命书批文 -> 全屏阅读页展示。
- *   键入 8 位以上纯数字时按 % 可切换乾造(男)/坤造(女)，默认乾造。
- *   阅读页点正文可放大/缩小字号，按 C 或点 × 返回计算器。
- *   其余任何输入（含 8 位纯数字）都按普通计算器处理，完全无痕。
+ *     -> 直连 DeepSeek 生成命书批文 -> 先显示在上方结果框，
+ *     点「⤢ 全屏」进入大字号阅读页，点「⤡ 缩小」收回结果框。
+ *   敲数字途中按 % 可切换乾造(男)/坤造(女)，默认乾造。
+ *   其余任何输入（运算、非日期数字）都按普通计算器处理。
  */
 import http from '@ohos.net.http'
 import { calcBazi, BaziLite } from '../libs/baziapi'
@@ -19,6 +22,15 @@ import { calcBazi, BaziLite } from '../libs/baziapi'
 const DEEPSEEK_URL = 'https://api.deepseek.com/chat/completions'
 const DEEPSEEK_KEY = 'sk-a485abd5f4f04224af2542286f45c601'
 const DEEPSEEK_MODEL = 'deepseek-flash'
+
+// 推演等待期间的玄学进度播报（每 6 秒轮换一条）
+const FORTUNE_STAGES: string[] = [
+  '焚香起盘，星斗布位……',
+  '八字已排好，DeepSeek 天师披衣起卦……',
+  '天师掐指细推，五行流转……',
+  '天机玄玄，墨迹将成……',
+  '批文欲就，心诚则灵……'
+]
 
 interface DSMessage {
   role: string
@@ -50,18 +62,24 @@ interface DSRespError {
   message?: string
 }
 
+// 隐藏模式识别结果
+interface FortuneMatch {
+  matched: boolean
+  hour: number // 0-23；-1 表示只输了生日，时辰需随机拈定
+}
+
 @Entry
 @Component
 struct Index {
   @State display: string = '0'
-  @State hint: string = '' // 橙色小字：挂起运算 / 乾坤指示 / 推演进度 / 错误提示
+  @State hint: string = '' // 橙色小字：挂起运算 / 推演进度播报 / 错误提示
   @State gender: number = 0 // 0男(乾造) 1女(坤造)，隐藏开关：% 键在输入 8 位以上数字时切换
   @State baziShort: string = ''
-  @State fortuneText: string = ''
+  @State fortuneText: string = '' // ''=无结果；非空时显示在上方结果框
   @State busy: boolean = false
-  @State fullView: boolean = false // 结果全屏阅读页
+  @State fullView: boolean = false // 全屏阅读页
   @State bigFont: boolean = false // 阅读页字号（点正文切换）
-  @State elapsed: number = 0 // 推演已用时（秒），等待期间显示在提示行
+  @State elapsed: number = 0 // 推演已用时（秒）
   private firstOperand: number = 0
   private pendingOp: string = ''
   private waitingForSecond: boolean = false
@@ -92,22 +110,48 @@ struct Index {
   }
 
   // ---------------- 隐藏触发识别 ----------------
-  // 纯数字 10 位（生日+时辰）或 12 位（生日+时分）且构成合法日期时间 -> 返回时辰 0-23；否则 -1
-  private parsePattern(s: string): number {
-    if (!/^\d{10}$|^\d{12}$/.test(s)) return -1
+  // 纯数字 8/10/12 位且像合法日期（+合法时间）-> matched；hour=-1 表示生日缺时辰
+  private parsePattern(s: string): FortuneMatch {
+    let nomatch: FortuneMatch = { matched: false, hour: -1 }
+    if (this.pendingOp !== '' || !/^\d{8}$|^\d{10}$|^\d{12}$/.test(s)) return nomatch
     let y = parseInt(s.slice(0, 4))
     let m = parseInt(s.slice(4, 6))
     let d = parseInt(s.slice(6, 8))
+    if (y < 1901 || y > 2099 || m < 1 || m > 12 || d < 1 || d > 31) return nomatch
+    if (s.length === 8) return { matched: true, hour: -1 } // 只输生日：时辰随机拈定
     let hh = parseInt(s.slice(8, 10))
-    if (y < 1901 || y > 2099 || m < 1 || m > 12 || d < 1 || d > 31) return -1
-    if (isNaN(hh) || hh > 23) return -1
-    if (s.length === 12 && parseInt(s.slice(10, 12)) > 59) return -1
-    return hh
+    if (isNaN(hh) || hh > 23) return nomatch
+    if (s.length === 12 && parseInt(s.slice(10, 12)) > 59) return nomatch
+    return { matched: true, hour: hh }
+  }
+
+  // 敲入的数字像生日时亮起的"魔法"装饰；退格破坏模式后自动消失
+  private magicHint(): string {
+    if (this.busy || this.fortuneText !== '' || this.pendingOp !== '') return ''
+    if (!/^\d{8,12}$/.test(this.display)) return ''
+    let y = parseInt(this.display.slice(0, 4))
+    let m = parseInt(this.display.slice(4, 6))
+    let d = parseInt(this.display.slice(6, 8))
+    if (y < 1901 || y > 2099 || m < 1 || m > 12 || d < 1 || d > 31) return ''
+    let out = `✦ ${this.gender === 0 ? '乾造(男)' : '坤造(女)'} · ${y}-${this.display.slice(4, 6)}-${this.display.slice(6, 8)}`
+    if (this.display.length >= 10) out += ` ${this.display.slice(8, 10)}时`
+    if (this.display.length === 12) out += `${this.display.slice(10, 12)}分`
+    if (this.display.length === 8) out += ' · 时辰待拈'
+    return out + ' · 天机感应中'
+  }
+
+  // 提示行内容：优先级 = 推演播报 > 魔法装饰 > 挂起运算
+  private topLine(): string {
+    if (this.busy) return this.hint
+    let magic = this.magicHint()
+    if (magic !== '') return magic
+    return this.hint !== '' ? this.hint : ' '
   }
 
   // ---------------- 输入处理 ----------------
   private inputDigit(d: string) {
     if (this.busy || this.fullView) return
+    if (this.fortuneText !== '') this.closeFortune() // 已有结果，敲数字即开始新一轮
     if (this.display === '错误' || this.waitingForSecond) {
       this.display = d
       this.waitingForSecond = false
@@ -120,6 +164,7 @@ struct Index {
 
   private inputDot() {
     if (this.busy || this.fullView) return
+    if (this.fortuneText !== '') this.closeFortune()
     if (this.display === '错误' || this.waitingForSecond) {
       this.display = '0.'
       this.waitingForSecond = false
@@ -130,6 +175,7 @@ struct Index {
 
   private setOp(op: string) {
     if (this.busy || this.fullView) return
+    if (this.fortuneText !== '') this.closeFortune()
     if (this.pendingOp !== '' && !this.waitingForSecond) {
       // 连续运算: 先算出前面的结果
       let r = this.calc(this.firstOperand, this.current(), this.pendingOp)
@@ -145,11 +191,11 @@ struct Index {
 
   private equals() {
     if (this.busy || this.fullView) return
-    // 隐藏彩蛋：没有挂起运算时，10/12 位合法日期时间 -> 算命；其余一律按普通等号
+    // 隐藏彩蛋：没有挂起运算时，8/10/12 位生日模式 -> 算命；其余一律按普通等号
     if (this.pendingOp === '') {
-      let hour = this.parsePattern(this.display)
-      if (hour >= 0) {
-        this.goFortune(hour)
+      let match = this.parsePattern(this.display)
+      if (match.matched) {
+        this.goFortune(match)
         return
       }
     }
@@ -164,7 +210,11 @@ struct Index {
 
   private clearAll() {
     if (this.busy) return
-    if (this.fullView) { // 阅读页按 C = 关闭并清场
+    if (this.fullView) { // 全屏页无键盘，正常不会走到这里
+      this.closeFortune()
+      return
+    }
+    if (this.fortuneText !== '') { // 结果框有内容：按 C 清场回到计算器
       this.closeFortune()
       return
     }
@@ -177,6 +227,7 @@ struct Index {
 
   private backspace() {
     if (this.busy || this.fullView) return
+    if (this.fortuneText !== '') this.closeFortune()
     if (this.display === '错误' || this.waitingForSecond) return
     this.display = this.display.length > 1 ? this.display.slice(0, -1) : '0'
   }
@@ -191,16 +242,26 @@ struct Index {
   }
 
   // ---------------- 赛博算命（隐藏） ----------------
-  private goFortune(hour: number) {
+  private goFortune(match: FortuneMatch) {
     let y = parseInt(this.display.slice(0, 4))
     let m = parseInt(this.display.slice(4, 6))
     let d = parseInt(this.display.slice(6, 8))
+    // 时辰：显式输入直接用；只输生日则现场随机拈一个（古人"时辰不知，以卜定之"）
+    let hour: number
+    let hourNote = ''
+    if (match.hour >= 0) {
+      hour = match.hour
+    } else {
+      hour = Math.floor(Math.random() * 24)
+      hourNote = `求测者不知出生时辰，现场拈得${hour}时，时柱由此而定。时柱可以照常推演，但涉及时柱的断语措辞宜留三分余地。`
+    }
     this.busy = true
     this.elapsed = 0
-    this.hint = '推演中 0s'
+    this.hint = FORTUNE_STAGES[0] + '（0s）'
     this.timerId = setInterval(() => {
       this.elapsed += 1
-      this.hint = `推演中 ${this.elapsed}s`
+      let stage = FORTUNE_STAGES[Math.floor(this.elapsed / 6) % FORTUNE_STAGES.length]
+      this.hint = `${stage}（${this.elapsed}s）`
     }, 1000)
 
     // 1. 本地排盘（无网络，毫秒级）
@@ -247,7 +308,7 @@ struct Index {
       {
         role: 'user',
         content: `以下是求测者排盘与本地推演结论（你的推演依据，正文不得直接引用其中的行话与数字）：
-${b.summary}
+${b.summary}${hourNote ? '\n注：' + hourNote : ''}
 
 请按系统指令为此命写一纸批文：推演以上述骨架为准并逐项对照成格破格，但落笔时全部转译成谶语判词加白话点破，行话与评分数字不得出现在正文。`
       }
@@ -280,8 +341,7 @@ ${b.summary}
       let r = JSON.parse(String(resp.result)) as DSResp
       let text = r.choices && r.choices.length > 0 && r.choices[0].message ? r.choices[0].message.content : undefined
       if (text) {
-        this.fortuneText = text
-        this.fullView = true // 直接进全屏阅读页
+        this.fortuneText = text // 先显示在上方结果框，用户可再点全屏
         this.hint = ''
       } else {
         this.hint = '解读失败：' + (r.error && r.error.message ? r.error.message : '返回为空')
@@ -316,7 +376,7 @@ ${b.summary}
 
   build() {
     if (this.fullView) {
-      // 全屏阅读页：结果不再挤在按键上方的小条里
+      // 全屏阅读页：大字号长文阅读；「⤡ 缩小」收回结果框，「✕ 关闭」清场
       Column() {
         Row() {
           Text(this.baziShort)
@@ -324,7 +384,7 @@ ${b.summary}
             .fontColor('#FF9F0A')
             .layoutWeight(1)
             .maxLines(1)
-          Text('×')
+          Text('✕')
             .fontSize(30)
             .fontColor(Color.White)
             .width(48)
@@ -354,35 +414,75 @@ ${b.summary}
           .textAlign(TextAlign.Center)
           .padding({ top: 4 })
 
-        Button('C · 关闭')
-          .fontSize(20)
-          .fontColor(Color.White)
-          .backgroundColor('#A5A5A5')
-          .width('60%')
-          .height(56)
-          .borderRadius(16)
-          .margin({ top: 8, bottom: 16 })
-          .onClick(() => this.closeFortune())
+        Row({ space: 12 }) {
+          Button('⤡ 缩小')
+            .fontSize(20)
+            .fontColor(Color.White)
+            .backgroundColor('#5856D6')
+            .layoutWeight(1)
+            .height(56)
+            .borderRadius(16)
+            .onClick(() => { this.fullView = false }) // 收回结果框，结果保留
+          Button('✕ 关闭')
+            .fontSize(20)
+            .fontColor(Color.White)
+            .backgroundColor('#A5A5A5')
+            .layoutWeight(1)
+            .height(56)
+            .borderRadius(16)
+            .margin({ bottom: 16 })
+            .onClick(() => this.closeFortune())
+        }
+        .width('70%')
+        .padding({ left: 16, right: 16, top: 8 })
       }
       .width('100%')
       .height('100%')
       .backgroundColor(Color.Black)
     } else {
       Column() {
-        // 显示屏
+        // 显示屏（结果优先显示在这里的小框里，可再点全屏）
         Column() {
-          Text(this.pendingOp !== '' ? this.hint : (this.hint !== '' ? this.hint : ' '))
-            .fontSize(24)
-            .fontColor('#FF9F0A')
+          if (this.fortuneText !== '') {
+            Row() {
+              Text(this.baziShort)
+                .fontSize(20)
+                .fontColor('#FF9F0A')
+                .layoutWeight(1)
+                .maxLines(1)
+              Text('⤢ 全屏')
+                .fontSize(20)
+                .fontColor('#FF9F0A')
+                .padding({ left: 12, right: 4, top: 4, bottom: 4 })
+                .onClick(() => { this.fullView = true })
+            }
             .width('100%')
-            .textAlign(TextAlign.End)
-            .maxLines(1)
-          Text(this.display)
-            .fontSize(56)
-            .fontColor(Color.White)
+            Scroll() {
+              Text(this.fortuneText)
+                .fontSize(20)
+                .fontColor(Color.White)
+                .width('100%')
+                .lineHeight(28)
+            }
+            .scrollable(ScrollDirection.Vertical)
             .width('100%')
-            .textAlign(TextAlign.End)
-            .maxLines(1)
+            .layoutWeight(1)
+            .align(Alignment.BottomEnd)
+            .margin({ top: 6 })
+          } else {
+            Text(this.topLine())
+              .fontSize(22)
+              .fontColor('#FF9F0A')
+              .width('100%')
+              .textAlign(TextAlign.End)
+              .maxLines(1)
+            Text(this.busy ? `☯ ${this.elapsed}s` : this.display)
+              .fontSize(this.busy ? 48 : 56)
+              .fontColor(this.busy ? '#FF9F0A' : Color.White)
+              .width('100%')
+              .textAlign(TextAlign.End)
+              .maxLines(1)
+          }
         }
         .width('100%')
         .padding({ left: 24, right: 24, top: 16, bottom: 12 })
@@ -396,10 +496,9 @@ ${b.summary}
             this.btn('←', '#A5A5A5', () => this.backspace())
             this.btn('%', '#A5A5A5', () => {
               if (this.busy || this.fullView) return
-              // 输入 8 位以上纯数字（疑似在敲隐藏模式）-> 切换乾造/坤造
+              // 输入 8 位以上纯数字（天机感应中）-> 切换乾造/坤造，装饰行即时更新
               if (/^\d{8,12}$/.test(this.display)) {
                 this.gender = this.gender === 0 ? 1 : 0
-                this.hint = this.gender === 0 ? '乾造(男)' : '坤造(女)'
                 return
               }
               let r = this.current() / 100
