@@ -110,14 +110,23 @@ struct Index {
   }
 
   // ---------------- 隐藏触发识别 ----------------
+  // 出生日期必须真实存在，且不晚于板子系统日期；年份下限维持 1901。
+  private validBirthDate(s: string): boolean {
+    let y = parseInt(s.slice(0, 4))
+    let m = parseInt(s.slice(4, 6))
+    let d = parseInt(s.slice(6, 8))
+    if (y < 1901 || m < 1 || m > 12 || d < 1 || d > 31) return false
+    let birth = new Date(y, m - 1, d)
+    let today = new Date()
+    return birth.getFullYear() === y && birth.getMonth() === m - 1 &&
+      birth.getDate() === d && birth.getTime() <= today.getTime()
+  }
+
   // 纯数字 8/10/12 位且像合法日期（+合法时间）-> matched；hour=-1 表示生日缺时辰
   private parsePattern(s: string): FortuneMatch {
     let nomatch: FortuneMatch = { matched: false, hour: -1 }
     if (this.pendingOp !== '' || !/^\d{8}$|^\d{10}$|^\d{12}$/.test(s)) return nomatch
-    let y = parseInt(s.slice(0, 4))
-    let m = parseInt(s.slice(4, 6))
-    let d = parseInt(s.slice(6, 8))
-    if (y < 1901 || y > 2099 || m < 1 || m > 12 || d < 1 || d > 31) return nomatch
+    if (!this.validBirthDate(s)) return nomatch
     if (s.length === 8) return { matched: true, hour: -1 } // 只输生日：时辰随机拈定
     let hh = parseInt(s.slice(8, 10))
     if (isNaN(hh) || hh > 23) return nomatch
@@ -129,10 +138,8 @@ struct Index {
   private magicHint(): string {
     if (this.busy || this.fortuneText !== '' || this.pendingOp !== '') return ''
     if (!/^\d{8,12}$/.test(this.display)) return ''
+    if (!this.validBirthDate(this.display)) return ''
     let y = parseInt(this.display.slice(0, 4))
-    let m = parseInt(this.display.slice(4, 6))
-    let d = parseInt(this.display.slice(6, 8))
-    if (y < 1901 || y > 2099 || m < 1 || m > 12 || d < 1 || d > 31) return ''
     let out = `✦ ${this.gender === 0 ? '乾造(男)' : '坤造(女)'} · ${y}-${this.display.slice(4, 6)}-${this.display.slice(6, 8)}`
     if (this.display.length >= 10) out += ` ${this.display.slice(8, 10)}时`
     if (this.display.length === 12) out += `${this.display.slice(10, 12)}分`
