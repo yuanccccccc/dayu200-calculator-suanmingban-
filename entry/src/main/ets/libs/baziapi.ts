@@ -238,9 +238,10 @@ function shenShaSummary(s: any): string {
 /**
  * gender: 0男 1女（应用约定）；bazi-mcp 内部约定为 1男 0女，此处转换。
  */
-export function calcBazi(y: number, m: number, d: number, hour: number, gender: number): BaziLite {
+export function calcBazi(y: number, m: number, d: number, hour: number, gender: number,
+  minute: number = 0, second: number = 0): BaziLite {
   const g = gender === 0 ? 1 : 0
-  const solarTime = SolarTime.fromYmdHms(y, m, d, hour, 0, 0)
+  const solarTime = SolarTime.fromYmdHms(y, m, d, hour, minute, second)
   const lunarHour = solarTime.getLunarHour()
   const bazi = buildBazi({ lunarHour: lunarHour, gender: g, eightCharProviderSect: 2 })
 

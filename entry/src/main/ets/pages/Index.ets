@@ -2,18 +2,9 @@
  * 简易计算器 - DAYU200 / OpenHarmony 4.0 (API 9 兼容)
  * 主页面: entry/src/main/ets/pages/Index.ets
  *
- * 隐藏彩蛋：赛博算命（界面上无任何入口）
- *   计算器状态下键入「生日」或「生日+时辰」或「生日+时辰+分钟」：
- *     8 位  如 20050317      = 2005-03-17（时辰不知，现场随机拈定）
- *     10 位 如 2005031703    = 2005-03-17 03时
- *     12 位 如 200503170257  = 2005-03-17 02:57
- *   敲满 8 位像合法生日的数字时，橙色提示行会亮起「✦ 乾造/坤造 · 天机感应中」
- *   等字样；退格到不像生日后装饰即刻隐去，如魔法显形/消散。
- *   按 = 触发：本地排盘（ets/libs/ 移植 bazi-mcp/tyme4ts）
- *     -> 直连 DeepSeek 生成命书批文 -> 先显示在上方结果框，
- *     点「⤢ 全屏」进入大字号阅读页，点「⤡ 缩小」收回结果框。
- *   敲数字途中按 % 可切换乾造(男)/坤造(女)，默认乾造。
- *   其余任何输入（运算、非日期数字）都按普通计算器处理。
+ * 隐藏彩蛋：8 位合法日期先向 AI 查询当天史事；找到后 = 写史事，+ 改走算命。
+ * 没找到明确史事时 = 算命；日期后继续输入 HH、HHMM 或 HHMMSS 则直接算命。
+ * 算命结果与史事全文共用结果框和全屏阅读页。
  */
 import http from '@ohos.net.http'
 import { calcBazi, BaziLite } from '../libs/baziapi'
@@ -30,6 +21,12 @@ const FORTUNE_STAGES: string[] = [
   '天师掐指细推，五行流转……',
   '天机玄玄，墨迹将成……',
   '批文欲就，心诚则灵……'
+]
+
+const EVENT_STAGES: string[] = [
+  '翻检旧卷，辨认那一天……',
+  '史事已寻得，正在梳理来龙去脉……',
+  '斟酌字句，为这一天落笔……'
 ]
 
 interface DSMessage {
@@ -66,6 +63,16 @@ interface DSRespError {
 interface FortuneMatch {
   matched: boolean
   hour: number // 0-23；-1 表示只输了生日，时辰需随机拈定
+  minute: number
+  second: number
+}
+
+interface EventLookup {
+  found: boolean
+  title: string
+  summary: string
+  facts: string
+  tone: string
 }
 
 @Entry
@@ -80,10 +87,17 @@ struct Index {
   @State fullView: boolean = false // 全屏阅读页
   @State bigFont: boolean = false // 阅读页字号（点正文切换）
   @State elapsed: number = 0 // 推演已用时（秒）
+  @State route: string = '' // searching / event / fortune
+  @State eventTitle: string = ''
+  @State eventSummary: string = ''
+  @State eventFacts: string = ''
+  @State eventTone: string = ''
   private firstOperand: number = 0
   private pendingOp: string = ''
   private waitingForSecond: boolean = false
   private timerId: number = -1
+  private lookupSerial: number = 0 // 忽略输入变化后才返回的旧检索结果
+  private queuedEquals: boolean = false
 
   // ---------------- 计算器逻辑 ----------------
   private calc(a: number, b: number, op: string): number {
@@ -110,39 +124,53 @@ struct Index {
   }
 
   // ---------------- 隐藏触发识别 ----------------
-  // 出生日期必须真实存在，且不晚于板子系统日期；年份下限维持 1901。
+  // 四位年份从 1000 年起可输入；日期必须真实存在，且不晚于板子系统日期。
   private validBirthDate(s: string): boolean {
     let y = parseInt(s.slice(0, 4))
     let m = parseInt(s.slice(4, 6))
     let d = parseInt(s.slice(6, 8))
-    if (y < 1901 || m < 1 || m > 12 || d < 1 || d > 31) return false
+    if (y < 1000 || m < 1 || m > 12 || d < 1 || d > 31) return false
     let birth = new Date(y, m - 1, d)
     let today = new Date()
     return birth.getFullYear() === y && birth.getMonth() === m - 1 &&
       birth.getDate() === d && birth.getTime() <= today.getTime()
   }
 
-  // 纯数字 8/10/12 位且像合法日期（+合法时间）-> matched；hour=-1 表示生日缺时辰
+  // 时间前缀也要合理，避免输入 29 时、67 分时亮起算命装饰。
+  private validTimePrefix(s: string): boolean {
+    if (s.length >= 9 && parseInt(s.slice(8, 9)) > 2) return false
+    if (s.length >= 10 && parseInt(s.slice(8, 10)) > 23) return false
+    if (s.length >= 11 && parseInt(s.slice(10, 11)) > 5) return false
+    if (s.length >= 12 && parseInt(s.slice(10, 12)) > 59) return false
+    if (s.length >= 13 && parseInt(s.slice(12, 13)) > 5) return false
+    if (s.length >= 14 && parseInt(s.slice(12, 14)) > 59) return false
+    return true
+  }
+
+  // 纯数字 8/10/12/14 位日期和时间；hour=-1 表示缺时辰。
   private parsePattern(s: string): FortuneMatch {
-    let nomatch: FortuneMatch = { matched: false, hour: -1 }
-    if (this.pendingOp !== '' || !/^\d{8}$|^\d{10}$|^\d{12}$/.test(s)) return nomatch
-    if (!this.validBirthDate(s)) return nomatch
-    if (s.length === 8) return { matched: true, hour: -1 } // 只输生日：时辰随机拈定
-    let hh = parseInt(s.slice(8, 10))
-    if (isNaN(hh) || hh > 23) return nomatch
-    if (s.length === 12 && parseInt(s.slice(10, 12)) > 59) return nomatch
-    return { matched: true, hour: hh }
+    let nomatch: FortuneMatch = { matched: false, hour: -1, minute: 0, second: 0 }
+    if (this.pendingOp !== '' || !/^(\d{8}|\d{10}|\d{12}|\d{14})$/.test(s)) return nomatch
+    if (!this.validBirthDate(s) || !this.validTimePrefix(s)) return nomatch
+    if (s.length === 8) return { matched: true, hour: -1, minute: 0, second: 0 }
+    return {
+      matched: true,
+      hour: parseInt(s.slice(8, 10)),
+      minute: s.length >= 12 ? parseInt(s.slice(10, 12)) : 0,
+      second: s.length === 14 ? parseInt(s.slice(12, 14)) : 0
+    }
   }
 
   // 敲入的数字像生日时亮起的"魔法"装饰；退格破坏模式后自动消失
   private magicHint(): string {
-    if (this.busy || this.fortuneText !== '' || this.pendingOp !== '') return ''
-    if (!/^\d{8,12}$/.test(this.display)) return ''
-    if (!this.validBirthDate(this.display)) return ''
+    if (this.busy || this.fortuneText !== '' || this.pendingOp !== '' || this.route !== 'fortune') return ''
+    if (!/^\d{8,14}$/.test(this.display)) return ''
+    if (!this.validBirthDate(this.display) || !this.validTimePrefix(this.display)) return ''
     let y = parseInt(this.display.slice(0, 4))
     let out = `✦ ${this.gender === 0 ? '乾造(男)' : '坤造(女)'} · ${y}-${this.display.slice(4, 6)}-${this.display.slice(6, 8)}`
-    if (this.display.length >= 10) out += ` ${this.display.slice(8, 10)}时`
-    if (this.display.length === 12) out += `${this.display.slice(10, 12)}分`
+    if (this.display.length >= 9) out += ` ${this.display.slice(8, 10)}${this.display.length === 9 ? '…' : '时'}`
+    if (this.display.length >= 11) out += `${this.display.slice(10, 12)}${this.display.length === 11 ? '…' : '分'}`
+    if (this.display.length >= 13) out += `${this.display.slice(12, 14)}${this.display.length === 13 ? '…' : '秒'}`
     if (this.display.length === 8) out += ' · 时辰待拈'
     return out + ' · 天机感应中'
   }
@@ -150,9 +178,116 @@ struct Index {
   // 提示行内容：优先级 = 推演播报 > 魔法装饰 > 挂起运算
   private topLine(): string {
     if (this.busy) return this.hint
+    if (this.route === 'searching') return this.hint
     let magic = this.magicHint()
     if (magic !== '') return magic
     return this.hint !== '' ? this.hint : ' '
+  }
+
+  private clearDateRoute() {
+    this.lookupSerial += 1
+    this.queuedEquals = false
+    this.route = ''
+    this.eventTitle = ''
+    this.eventSummary = ''
+    this.eventFacts = ''
+    this.eventTone = ''
+  }
+
+  private refreshDateRoute() {
+    let s = this.display
+    if (this.pendingOp === '' && /^\d{8}$/.test(s) && this.validBirthDate(s)) {
+      this.beginEventLookup(s, false)
+      return
+    }
+    this.clearDateRoute()
+    if (this.pendingOp === '' && /^\d{9,14}$/.test(s) &&
+      this.validBirthDate(s) && this.validTimePrefix(s)) {
+      this.route = 'fortune'
+    }
+    this.hint = ''
+  }
+
+  // 检索未找到、超时或响应异常都回到默认算命路线。
+  private useFortuneAfterLookup(date: string, serial: number) {
+    if (serial !== this.lookupSerial || this.route !== 'searching' || this.display !== date) return
+    let writeNow = this.queuedEquals
+    this.queuedEquals = false
+    this.route = 'fortune'
+    this.hint = ''
+    if (writeNow) this.goFortune(this.parsePattern(date))
+  }
+
+  // 8 位合法日期立即问 AI；请求期间仍允许继续输入时间或按 +。
+  private beginEventLookup(date: string, writeAfterLookup: boolean) {
+    this.clearDateRoute()
+    let serial = this.lookupSerial
+    this.queuedEquals = writeAfterLookup
+    this.route = 'searching'
+    this.hint = '✦ 搜寻史册中 · ' + date.slice(0, 4) + '-' + date.slice(4, 6) + '-' + date.slice(6, 8)
+    let req: DSReq = {
+      model: DEEPSEEK_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content: '你是谨慎的中国历史教材编辑。仅凭你确定的知识，判断指定公历日期是否对应一件重大历史事件，或一位广为人知的历史人物的确切生日。优先级：①中华人民共和国、国家发展和中国共产党的重大事件；②南开大学相关的重大事件；③中国初高中历史课本常见的事件与人物；④仅限爱因斯坦等普通学生也熟悉的外国人物或重大事件。只选其中最重要的一件；冷僻人物、地方小事、未进入常见历史教学的条目一律不要。必须能确认准确的公历年月日；“牛顿发现万有引力”这类没有可靠单日日期的过程不得硬配某一天，古代农历与公历换算不确定也不得猜测。无法确认或不符合范围就返回 found=false。只返回一个 JSON 对象，字段必须是 found(布尔值)、title(短标题)、summary(40字内简介)、facts(2至3条确知事实的纯文本)、tone(庄严/沉痛/欣喜等基调)。未找到时其他字段用空字符串。不要 Markdown，不要虚构引语、数字或人物。'
+        },
+        {
+          role: 'user',
+          content: `公历 ${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)} 发生过什么足够重要且日期确切的事件，或是哪位重要历史人物的出生日期？`
+        }
+      ],
+      max_tokens: 600,
+      temperature: 0.1,
+      reasoning_effort: 'low'
+    }
+    let client = http.createHttp()
+    client.request(DEEPSEEK_URL, {
+      method: http.RequestMethod.POST,
+      header: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + DEEPSEEK_KEY
+      },
+      extraData: JSON.stringify(req),
+      connectTimeout: 15000,
+      readTimeout: 60000
+    }).then((resp: http.HttpResponse) => {
+      client.destroy()
+      if (serial !== this.lookupSerial || this.route !== 'searching' || this.display !== date) return
+      if (resp.responseCode !== 200) {
+        this.useFortuneAfterLookup(date, serial)
+        return
+      }
+      try {
+        let answer = JSON.parse(String(resp.result)) as DSResp
+        let content = answer.choices && answer.choices.length > 0 && answer.choices[0].message
+          ? answer.choices[0].message.content : ''
+        if (!content) throw new Error('返回为空')
+        let clean = content.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
+        let found = JSON.parse(clean) as EventLookup
+        if (found.found === true && found.title && found.summary && found.facts && found.tone) {
+          this.route = 'event'
+          this.eventTitle = found.title
+          this.eventSummary = found.summary
+          this.eventFacts = found.facts
+          this.eventTone = found.tone
+          this.hint = ''
+          if (this.queuedEquals) {
+            this.queuedEquals = false
+            this.goEventEssay()
+          }
+        } else if (found.found === false) {
+          this.useFortuneAfterLookup(date, serial)
+        } else {
+          throw new Error('检索结果格式不完整')
+        }
+      } catch (e) {
+        this.useFortuneAfterLookup(date, serial)
+      }
+    }).catch((e: Error) => {
+      client.destroy()
+      this.useFortuneAfterLookup(date, serial)
+    })
   }
 
   // ---------------- 输入处理 ----------------
@@ -164,9 +299,10 @@ struct Index {
       this.waitingForSecond = false
     } else if (this.display === '0') {
       this.display = d
-    } else if (this.display.length < 12) {
+    } else if (this.display.length < 14) {
       this.display += d
     }
+    this.refreshDateRoute()
   }
 
   private inputDot() {
@@ -178,11 +314,21 @@ struct Index {
     } else if (!this.display.includes('.')) {
       this.display += '.'
     }
+    this.clearDateRoute()
+    this.hint = ''
   }
 
   private setOp(op: string) {
     if (this.busy || this.fullView) return
     if (this.fortuneText !== '') this.closeFortune()
+    if (op === '+' && /^\d{8}$/.test(this.display) && this.validBirthDate(this.display) &&
+      (this.route === 'searching' || this.route === 'event')) {
+      this.clearDateRoute()
+      this.route = 'fortune'
+      this.hint = ''
+      return
+    }
+    this.clearDateRoute()
     if (this.pendingOp !== '' && !this.waitingForSecond) {
       // 连续运算: 先算出前面的结果
       let r = this.calc(this.firstOperand, this.current(), this.pendingOp)
@@ -198,10 +344,25 @@ struct Index {
 
   private equals() {
     if (this.busy || this.fullView) return
-    // 隐藏彩蛋：没有挂起运算时，8/10/12 位生日模式 -> 算命；其余一律按普通等号
+    // 8 位日期先完成史事分流；时间输入或明确切到算命时走本地排盘。
     if (this.pendingOp === '') {
       let match = this.parsePattern(this.display)
       if (match.matched) {
+        if (this.display.length === 8) {
+          if (this.route === 'searching') {
+            this.queuedEquals = true
+            this.hint = '正在检索；找到结果后将自动继续……'
+            return
+          }
+          if (this.route === 'event') {
+            this.goEventEssay()
+            return
+          }
+          if (this.route === '') {
+            this.beginEventLookup(this.display, true)
+            return
+          }
+        }
         this.goFortune(match)
         return
       }
@@ -226,6 +387,7 @@ struct Index {
       return
     }
     this.display = '0'
+    this.clearDateRoute()
     this.hint = ''
     this.firstOperand = 0
     this.pendingOp = ''
@@ -237,15 +399,85 @@ struct Index {
     if (this.fortuneText !== '') this.closeFortune()
     if (this.display === '错误' || this.waitingForSecond) return
     this.display = this.display.length > 1 ? this.display.slice(0, -1) : '0'
+    this.refreshDateRoute()
   }
 
   private closeFortune() {
+    this.clearDateRoute()
     this.fullView = false
     this.fortuneText = ''
     this.baziShort = ''
     this.display = '0'
     this.hint = ''
     this.bigFont = false
+  }
+
+  // ---------------- 史事短文 ----------------
+  private goEventEssay() {
+    let date = `${this.display.slice(0, 4)}-${this.display.slice(4, 6)}-${this.display.slice(6, 8)}`
+    let title = this.eventTitle
+    let summary = this.eventSummary
+    let facts = this.eventFacts
+    let tone = this.eventTone
+    this.busy = true
+    this.elapsed = 0
+    this.hint = EVENT_STAGES[0] + '（0s）'
+    this.timerId = setInterval(() => {
+      this.elapsed += 1
+      let stage = EVENT_STAGES[Math.floor(this.elapsed / 6) % EVENT_STAGES.length]
+      this.hint = `${stage}（${this.elapsed}s）`
+    }, 1000)
+    let req: DSReq = {
+      model: DEEPSEEK_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content: '你是历史短文作者。依据给定日期、事件和事实写一段有感染力的中文短文，约350至500字，分成2至4段。先交代这一天发生了什么，再写事情的走向与时代处境，最后以符合给定基调的句子收束。悲剧保持克制，喜事可以明朗；人物生辰可写其后来的人生影响，但不可编造细节。不得虚构引语、统计数字、后续事件或历史人物的心理活动；给定事实不足时宁可写短。不要把AI线索称为已核实史料。只输出正文纯文本。'
+        },
+        {
+          role: 'user',
+          content: `公历日期：${date}\n事件：${title}\n简述：${summary}\n已知事实：${facts}\n情感基调：${tone}\n请据此写一段史事短文。`
+        }
+      ],
+      max_tokens: 6000,
+      temperature: 0.5,
+      reasoning_effort: 'low'
+    }
+    let client = http.createHttp()
+    client.request(DEEPSEEK_URL, {
+      method: http.RequestMethod.POST,
+      header: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + DEEPSEEK_KEY
+      },
+      extraData: JSON.stringify(req),
+      connectTimeout: 15000,
+      readTimeout: 120000
+    }).then((resp: http.HttpResponse) => {
+      client.destroy()
+      this.stopTimer()
+      this.busy = false
+      if (resp.responseCode !== 200) {
+        this.hint = '史事写作失败 HTTP ' + resp.responseCode + '；按 = 重试'
+        return
+      }
+      try {
+        let answer = JSON.parse(String(resp.result)) as DSResp
+        let content = answer.choices && answer.choices.length > 0 && answer.choices[0].message
+          ? answer.choices[0].message.content : ''
+        if (!content) throw new Error('返回为空')
+        this.baziShort = `${date} · ${title}`
+        this.fortuneText = content
+        this.hint = ''
+      } catch (e) {
+        this.hint = '史事写作结果无法读取；按 = 重试'
+      }
+    }).catch((e: Error) => {
+      client.destroy()
+      this.stopTimer()
+      this.busy = false
+      this.hint = '史事写作失败：' + (e.message || '网络不可用') + '；按 = 重试'
+    })
   }
 
   // ---------------- 赛博算命（隐藏） ----------------
@@ -274,7 +506,7 @@ struct Index {
     // 1. 本地排盘（无网络，毫秒级）
     let b: BaziLite
     try {
-      b = calcBazi(y, m, d, hour, this.gender)
+      b = calcBazi(y, m, d, hour, this.gender, match.minute, match.second)
     } catch (e) {
       this.stopTimer()
       this.busy = false
@@ -476,6 +708,38 @@ ${b.summary}${hourNote ? '\n注：' + hourNote : ''}
             .layoutWeight(1)
             .align(Alignment.BottomEnd)
             .margin({ top: 6 })
+          } else if (this.route === 'event') {
+            Text(`✦ 史册有载 · ${this.display.slice(0, 4)}-${this.display.slice(4, 6)}-${this.display.slice(6, 8)}`)
+              .fontSize(21)
+              .fontColor('#FF9F0A')
+              .width('100%')
+              .textAlign(TextAlign.End)
+            Text(this.eventTitle)
+              .fontSize(32)
+              .fontColor(Color.White)
+              .width('100%')
+              .textAlign(TextAlign.End)
+              .maxLines(2)
+              .margin({ top: 12 })
+            Text(this.eventSummary)
+              .fontSize(21)
+              .fontColor('#DDDDDD')
+              .width('100%')
+              .textAlign(TextAlign.End)
+              .maxLines(3)
+              .margin({ top: 8 })
+            Text(this.hint !== '' ? this.hint : '按 = 写史事全文 · 按 + 改为算命')
+              .fontSize(18)
+              .fontColor('#FF9F0A')
+              .width('100%')
+              .textAlign(TextAlign.End)
+              .margin({ top: 12 })
+            Text('AI 提供的史事线索，重要事实请核对')
+              .fontSize(14)
+              .fontColor('#888888')
+              .width('100%')
+              .textAlign(TextAlign.End)
+              .margin({ top: 5 })
           } else {
             Text(this.topLine())
               .fontSize(22)
@@ -503,13 +767,15 @@ ${b.summary}${hourNote ? '\n注：' + hourNote : ''}
             this.btn('←', '#A5A5A5', () => this.backspace())
             this.btn('%', '#A5A5A5', () => {
               if (this.busy || this.fullView) return
-              // 输入 8 位以上纯数字（天机感应中）-> 切换乾造/坤造，装饰行即时更新
-              if (/^\d{8,12}$/.test(this.display)) {
+              // 进入算命路线后才用 % 切换乾坤；史事路线用 + 切换。
+              if (this.route === 'fortune' && /^\d{8,14}$/.test(this.display)) {
                 this.gender = this.gender === 0 ? 1 : 0
                 return
               }
+              this.clearDateRoute()
               let r = this.current() / 100
               this.display = this.format(r)
+              this.hint = ''
             })
             this.btn('÷', '#FF9F0A', () => this.setOp('÷'))
           }
