@@ -69,10 +69,71 @@ interface FortuneMatch {
 
 interface EventLookup {
   found: boolean
+  matchedDate: string // YYYY-MM-DD，必须和输入日期一致
+  kind: string // event / birth；逝世、校庆纪念日归 event
+  dateRelation: string // occurred / anniversary / born
+  personName: string
   title: string
   summary: string
   facts: string
   tone: string
+}
+
+const HISTORY_LOOKUP_PROMPT: string = [
+  '你是给中国初高中学生选取“历史上的今天”的谨慎编辑。只依据你有把握的历史知识回答；你没有实时检索资料的能力，不得装作查过档案。',
+  '先找与输入日期精确对应的候选，再按以下顺序挑一条：①中国国家发展和中国共产党的重大事件；②南开大学创办、校庆、复校等重要史事；③初高中历史课本常见的中国事件和重要人物诞辰；④少数广为人知且日期确切的外国人物诞辰或世界事件。南开大学是明确的专门收录对象，不受“课本未收录”限制。冷僻人物、地方琐事和无明确日期的长期过程不要选。',
+  '类别必须分清：某人出生的准确日期是 birth；逝世、建国、建校纪念日等是 event。建校纪念日可以入选，但要把“后来确定的校庆日”与“当日确实举行的典礼”分开，不能混写。历史上的农历、儒略历和公历若无法确定换算，宁可不选。',
+  '人物诞辰只收录1800年及以后的重要人物；更早日期仍可寻找重大事件。1901年以前的日期不因算命范围较窄而被排除。',
+  '仅输出一行 JSON 对象，不要代码块。字段：found 布尔值；matchedDate 为与输入完全相同的 YYYY-MM-DD 或空字符串；kind 为 event、birth 或空字符串；dateRelation 为 occurred、anniversary、born 或空字符串；personName 人名或空字符串；title 不超过18字；summary 不超过45字；facts 用2至4个有把握的具体史实串成一段，写清时间与关联，不得猜想；tone 用2至6字描述情绪基调。found=false 时其余字段均为空字符串。绝不虚构引语、精确数字、出席者和场景。'
+].join('\n')
+
+const HISTORY_EVENT_PROMPT: string = [
+  '你写的是供大一学生朗读的历史短文，约450至650字，分3至4个自然段。根据给定的史实写清背景、事情如何展开、后来的影响，再用一两句有余味的文字收束。用一处贯穿前后的意象或恰当比喻增加文采，但每段仍要有具体史事；不要凭空造出人群、天气、口号、对话或亲历者心情。',
+  '文字要有节奏和画面感，句子长短交错，少用抽象名词和套话。以社会主义核心价值观为价值坐标：对于建国、革命和建设，写具体行动与历史后果，让爱国、责任、求真从事实中显出来；不堆“伟大光辉”“注定辉煌”之类空泛赞语。对牺牲、灾难和逝世保持克制与尊重，不作戏剧化消费。对历史人物和组织的评价实事求是，既不猎奇贬损，也不把复杂历史写成一串口号。',
+  '只能使用输入中的事实作事实依据；输入没给出的具体日期、人数、引语和因果不要补。若 dateRelation 是 anniversary，应明确这是纪念日期，不能写成当日举办了开学或成立典礼。正文纯文本，不要 Markdown。'
+].join('\n')
+
+const HISTORY_BIRTH_PROMPT: string = [
+  '你写的是历史人物诞辰纪念短文，不是算命，也不推断命运。用给定史实串起人物的经历、关键选择、成就及历史影响；评价要有依据，可写功绩与局限，但不得凭空揣测内心。语言有文采、有温度，避免口号、神化和空洞赞歌。以社会主义核心价值观为价值坐标，让爱国、敬业、求真、为人民服务等价值通过具体行动和结果体现，不直接罗列价值词。',
+  '格式固定，全文约500至700字：',
+  '【题辞】四句七言诗。七言指每句七个汉字；诗句须回望已知生平，不写生辰八字、天命、吉凶、五行或预言。',
+  '【行迹】按时间讲清出身、学习或早年行动与后来两三件关键史事。',
+  '【转折】选一处有史实依据的选择或时代关口，写其行动及结果。',
+  '【评议】第一行单独写一句不超过八字的凝练判词，第二行起用白话论证贡献与局限；不可只下赞语。',
+  '【回响】写这段人生留给后人的问题或启发，以具体而有余味的句子收束。',
+  '只用输入中的事实；不得新增未经提供的精确数字、引语、细节和心理活动。若材料不足，宁可缩短，不能填空。正文纯文本，不要 Markdown。'
+].join('\n')
+
+// 南开大学官方校史：1919-09-25 开学；11-22 举行成立纪念大会（原拟 10-17）；
+// 现行章程规定校庆日为 10-17。1919-10-17 应表述为建校纪念日，不是开学典礼。
+// https://www.nankai.edu.cn/173/list.htm
+// https://xxgk.nankai.edu.cn/2024/0122/c2762a535612/page.htm
+// https://www.nankai.edu.cn/_s264/162/list.psp
+const NANKAI_FOUNDING_DAY: EventLookup = {
+  found: true,
+  matchedDate: '1919-10-17',
+  kind: 'event',
+  dateRelation: 'anniversary',
+  personName: '',
+  title: '南开大学建校纪念日',
+  summary: '南开大学创办于1919年，10月17日是学校校庆日。',
+  facts: '南开大学由严修、张伯苓秉承教育救国理念创办，1919年9月25日举行开学典礼；成立纪念大会原拟10月17日举行，实际于11月22日举行。1937年校园遭侵华日军炸毁，学校南迁，1938年在昆明与北京大学、清华大学组成国立西南联合大学。1946年回天津复校；学校现行章程规定10月17日为校庆日。',
+  tone: '庄重昂扬'
+}
+
+// 毛主席纪念堂公开年表与生平资料：
+// https://cpc.people.com.cn/GB/143527/143544/10536428.html
+// https://cpc.people.com.cn/GB/143527/143544/index.html
+const MAO_BIRTH_DAY: EventLookup = {
+  found: true,
+  matchedDate: '1893-12-26',
+  kind: 'birth',
+  dateRelation: 'born',
+  personName: '毛泽东',
+  title: '毛泽东诞辰',
+  summary: '1893年12月26日，毛泽东出生于湖南湘潭韶山冲。',
+  facts: '毛泽东1893年12月26日出生于湖南湘潭韶山冲。青年时在长沙求学，组织新民学会，探索救国道路。他是中国共产党、中国人民解放军和中华人民共和国的主要缔造者之一，领导中国革命取得胜利；1949年10月1日出席开国大典，宣告中华人民共和国中央人民政府成立。其历史功绩重大，晚年亦犯过严重错误，评价应坚持实事求是。',
+  tone: '庄重深沉'
 }
 
 @Entry
@@ -87,7 +148,11 @@ struct Index {
   @State fullView: boolean = false // 全屏阅读页
   @State bigFont: boolean = false // 阅读页字号（点正文切换）
   @State elapsed: number = 0 // 推演已用时（秒）
-  @State route: string = '' // searching / event / fortune
+  @State route: string = '' // searching / event / fortune / historyOnly
+  @State eventKind: string = '' // event / birth
+  @State eventDateRelation: string = ''
+  @State eventPersonName: string = ''
+  @State eventSourceNote: string = ''
   @State eventTitle: string = ''
   @State eventSummary: string = ''
   @State eventFacts: string = ''
@@ -124,8 +189,8 @@ struct Index {
   }
 
   // ---------------- 隐藏触发识别 ----------------
-  // 四位年份从 1000 年起可输入；日期必须真实存在，且不晚于板子系统日期。
-  private validBirthDate(s: string): boolean {
+  // 史事可查 1000 年起的四位年份；日期必须真实存在，且不晚于板子系统日期。
+  private validHistoricalDate(s: string): boolean {
     let y = parseInt(s.slice(0, 4))
     let m = parseInt(s.slice(4, 6))
     let d = parseInt(s.slice(6, 8))
@@ -134,6 +199,15 @@ struct Index {
     let today = new Date()
     return birth.getFullYear() === y && birth.getMonth() === m - 1 &&
       birth.getDate() === d && birth.getTime() <= today.getTime()
+  }
+
+  // 人物诞辰从 1800 年起收录；命盘沿用较稳妥的 1901 年起范围。
+  private validPersonBirthDate(s: string): boolean {
+    return this.validHistoricalDate(s) && parseInt(s.slice(0, 4)) >= 1800
+  }
+
+  private validFortuneDate(s: string): boolean {
+    return this.validHistoricalDate(s) && parseInt(s.slice(0, 4)) >= 1901
   }
 
   // 时间前缀也要合理，避免输入 29 时、67 分时亮起算命装饰。
@@ -151,7 +225,7 @@ struct Index {
   private parsePattern(s: string): FortuneMatch {
     let nomatch: FortuneMatch = { matched: false, hour: -1, minute: 0, second: 0 }
     if (this.pendingOp !== '' || !/^(\d{8}|\d{10}|\d{12}|\d{14})$/.test(s)) return nomatch
-    if (!this.validBirthDate(s) || !this.validTimePrefix(s)) return nomatch
+    if (!this.validFortuneDate(s) || !this.validTimePrefix(s)) return nomatch
     if (s.length === 8) return { matched: true, hour: -1, minute: 0, second: 0 }
     return {
       matched: true,
@@ -165,7 +239,7 @@ struct Index {
   private magicHint(): string {
     if (this.busy || this.fortuneText !== '' || this.pendingOp !== '' || this.route !== 'fortune') return ''
     if (!/^\d{8,14}$/.test(this.display)) return ''
-    if (!this.validBirthDate(this.display) || !this.validTimePrefix(this.display)) return ''
+    if (!this.validFortuneDate(this.display) || !this.validTimePrefix(this.display)) return ''
     let y = parseInt(this.display.slice(0, 4))
     let out = `✦ ${this.gender === 0 ? '乾造(男)' : '坤造(女)'} · ${y}-${this.display.slice(4, 6)}-${this.display.slice(6, 8)}`
     if (this.display.length >= 9) out += ` ${this.display.slice(8, 10)}${this.display.length === 9 ? '…' : '时'}`
@@ -178,7 +252,7 @@ struct Index {
   // 提示行内容：优先级 = 推演播报 > 魔法装饰 > 挂起运算
   private topLine(): string {
     if (this.busy) return this.hint
-    if (this.route === 'searching') return this.hint
+    if (this.route === 'searching' || this.route === 'historyOnly') return this.hint
     let magic = this.magicHint()
     if (magic !== '') return magic
     return this.hint !== '' ? this.hint : ' '
@@ -188,6 +262,10 @@ struct Index {
     this.lookupSerial += 1
     this.queuedEquals = false
     this.route = ''
+    this.eventKind = ''
+    this.eventDateRelation = ''
+    this.eventPersonName = ''
+    this.eventSourceNote = ''
     this.eventTitle = ''
     this.eventSummary = ''
     this.eventFacts = ''
@@ -196,16 +274,22 @@ struct Index {
 
   private refreshDateRoute() {
     let s = this.display
-    if (this.pendingOp === '' && /^\d{8}$/.test(s) && this.validBirthDate(s)) {
+    if (this.pendingOp === '' && /^\d{8}$/.test(s) && this.validHistoricalDate(s)) {
       this.beginEventLookup(s, false)
       return
     }
     this.clearDateRoute()
     if (this.pendingOp === '' && /^\d{9,14}$/.test(s) &&
-      this.validBirthDate(s) && this.validTimePrefix(s)) {
+      this.validFortuneDate(s) && this.validTimePrefix(s)) {
       this.route = 'fortune'
+      this.hint = ''
+    } else if (this.pendingOp === '' && /^\d{9,14}$/.test(s) &&
+      this.validHistoricalDate(s) && !this.validFortuneDate(s)) {
+      this.route = 'historyOnly'
+      this.hint = '命盘仅支持 1901 年及以后'
+    } else {
+      this.hint = ''
     }
-    this.hint = ''
   }
 
   // 检索未找到、超时或响应异常都回到默认算命路线。
@@ -213,9 +297,45 @@ struct Index {
     if (serial !== this.lookupSerial || this.route !== 'searching' || this.display !== date) return
     let writeNow = this.queuedEquals
     this.queuedEquals = false
-    this.route = 'fortune'
-    this.hint = ''
-    if (writeNow) this.goFortune(this.parsePattern(date))
+    if (this.validFortuneDate(date)) {
+      this.route = 'fortune'
+      this.hint = ''
+      if (writeNow) this.goFortune(this.parsePattern(date))
+    } else {
+      this.route = 'historyOnly'
+      this.hint = '✦ 暂无可展示的史事 · 命盘支持 1901 年起'
+    }
+  }
+
+  private finishHistoryLookup(date: string, serial: number, candidate: EventLookup | null) {
+    if (serial !== this.lookupSerial || this.route !== 'searching' || this.display !== date) return
+    // 校史日期已有官方资料核对。AI 仍参与查询，遇到遗漏或断线时使用这一条本地事实锚点。
+    let item: EventLookup | null = date === '19191017' ? NANKAI_FOUNDING_DAY
+      : date === '18931226' ? MAO_BIRTH_DAY : candidate
+    let expectedDate = `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}`
+    if (item && item.found === true && item.matchedDate === expectedDate &&
+      item.title && item.summary && item.facts && item.tone &&
+      ((item.kind === 'event' && (item.dateRelation === 'occurred' || item.dateRelation === 'anniversary')) ||
+        (item.kind === 'birth' && item.dateRelation === 'born' && item.personName && this.validPersonBirthDate(date)))) {
+      this.route = 'event'
+      this.eventKind = item.kind
+      this.eventDateRelation = item.dateRelation
+      this.eventPersonName = item.personName || ''
+      this.eventTitle = item.title
+      this.eventSummary = item.summary
+      this.eventFacts = item.facts
+      this.eventTone = item.tone
+      this.eventSourceNote = date === '19191017' ? '据南开大学官方校史与章程核对'
+        : date === '18931226' ? '据毛主席纪念堂公开年表核对'
+          : 'AI 提供的历史线索，重要事实请核对'
+      this.hint = ''
+      if (this.queuedEquals) {
+        this.queuedEquals = false
+        this.goEventEssay()
+      }
+    } else {
+      this.useFortuneAfterLookup(date, serial)
+    }
   }
 
   // 8 位合法日期立即问 AI；请求期间仍允许继续输入时间或按 +。
@@ -225,19 +345,22 @@ struct Index {
     this.queuedEquals = writeAfterLookup
     this.route = 'searching'
     this.hint = '✦ 搜寻史册中 · ' + date.slice(0, 4) + '-' + date.slice(4, 6) + '-' + date.slice(6, 8)
+    let nankaiContext = date === '19191017'
+      ? '已核对南开大学校史：南开大学创办于1919年；1919年9月25日举行开学典礼；成立纪念大会原拟10月17日，实际于11月22日举行；学校章程规定10月17日为校庆日。应识别为建校纪念日，不得说10月17日举行了开学典礼。'
+      : ''
     let req: DSReq = {
       model: DEEPSEEK_MODEL,
       messages: [
         {
           role: 'system',
-          content: '你是谨慎的中国历史教材编辑。仅凭你确定的知识，判断指定公历日期是否对应一件重大历史事件，或一位广为人知的历史人物的确切生日。优先级：①中华人民共和国、国家发展和中国共产党的重大事件；②南开大学相关的重大事件；③中国初高中历史课本常见的事件与人物；④仅限爱因斯坦等普通学生也熟悉的外国人物或重大事件。只选其中最重要的一件；冷僻人物、地方小事、未进入常见历史教学的条目一律不要。必须能确认准确的公历年月日；“牛顿发现万有引力”这类没有可靠单日日期的过程不得硬配某一天，古代农历与公历换算不确定也不得猜测。无法确认或不符合范围就返回 found=false。只返回一个 JSON 对象，字段必须是 found(布尔值)、title(短标题)、summary(40字内简介)、facts(2至3条确知事实的纯文本)、tone(庄严/沉痛/欣喜等基调)。未找到时其他字段用空字符串。不要 Markdown，不要虚构引语、数字或人物。'
+          content: HISTORY_LOOKUP_PROMPT
         },
         {
           role: 'user',
-          content: `公历 ${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)} 发生过什么足够重要且日期确切的事件，或是哪位重要历史人物的出生日期？`
+          content: `目标公历日期：${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}。请先核对日期归属，再选择一条适合课堂讲述的事件或人物诞辰。${nankaiContext}`
         }
       ],
-      max_tokens: 600,
+      max_tokens: 1200,
       temperature: 0.1,
       reasoning_effort: 'low'
     }
@@ -255,7 +378,7 @@ struct Index {
       client.destroy()
       if (serial !== this.lookupSerial || this.route !== 'searching' || this.display !== date) return
       if (resp.responseCode !== 200) {
-        this.useFortuneAfterLookup(date, serial)
+        this.finishHistoryLookup(date, serial, null)
         return
       }
       try {
@@ -265,28 +388,13 @@ struct Index {
         if (!content) throw new Error('返回为空')
         let clean = content.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
         let found = JSON.parse(clean) as EventLookup
-        if (found.found === true && found.title && found.summary && found.facts && found.tone) {
-          this.route = 'event'
-          this.eventTitle = found.title
-          this.eventSummary = found.summary
-          this.eventFacts = found.facts
-          this.eventTone = found.tone
-          this.hint = ''
-          if (this.queuedEquals) {
-            this.queuedEquals = false
-            this.goEventEssay()
-          }
-        } else if (found.found === false) {
-          this.useFortuneAfterLookup(date, serial)
-        } else {
-          throw new Error('检索结果格式不完整')
-        }
+        this.finishHistoryLookup(date, serial, found)
       } catch (e) {
-        this.useFortuneAfterLookup(date, serial)
+        this.finishHistoryLookup(date, serial, null)
       }
     }).catch((e: Error) => {
       client.destroy()
-      this.useFortuneAfterLookup(date, serial)
+      this.finishHistoryLookup(date, serial, null)
     })
   }
 
@@ -321,8 +429,12 @@ struct Index {
   private setOp(op: string) {
     if (this.busy || this.fullView) return
     if (this.fortuneText !== '') this.closeFortune()
-    if (op === '+' && /^\d{8}$/.test(this.display) && this.validBirthDate(this.display) &&
+    if (op === '+' && /^\d{8}$/.test(this.display) && this.validHistoricalDate(this.display) &&
       (this.route === 'searching' || this.route === 'event')) {
+      if (!this.validFortuneDate(this.display)) {
+        this.hint = '命盘仅支持 1901 年及以后'
+        return
+      }
       this.clearDateRoute()
       this.route = 'fortune'
       this.hint = ''
@@ -346,23 +458,24 @@ struct Index {
     if (this.busy || this.fullView) return
     // 8 位日期先完成史事分流；时间输入或明确切到算命时走本地排盘。
     if (this.pendingOp === '') {
+      if (/^\d{8}$/.test(this.display) && this.validHistoricalDate(this.display)) {
+        if (this.route === 'searching') {
+          this.queuedEquals = true
+          this.hint = '正在检索；找到结果后将自动继续……'
+          return
+        }
+        if (this.route === 'event') {
+          this.goEventEssay()
+          return
+        }
+        if (this.route === 'historyOnly') return
+        if (this.route === '') {
+          this.beginEventLookup(this.display, true)
+          return
+        }
+      }
       let match = this.parsePattern(this.display)
       if (match.matched) {
-        if (this.display.length === 8) {
-          if (this.route === 'searching') {
-            this.queuedEquals = true
-            this.hint = '正在检索；找到结果后将自动继续……'
-            return
-          }
-          if (this.route === 'event') {
-            this.goEventEssay()
-            return
-          }
-          if (this.route === '') {
-            this.beginEventLookup(this.display, true)
-            return
-          }
-        }
         this.goFortune(match)
         return
       }
@@ -415,10 +528,14 @@ struct Index {
   // ---------------- 史事短文 ----------------
   private goEventEssay() {
     let date = `${this.display.slice(0, 4)}-${this.display.slice(4, 6)}-${this.display.slice(6, 8)}`
+    let isBirth = this.eventKind === 'birth'
     let title = this.eventTitle
     let summary = this.eventSummary
     let facts = this.eventFacts
     let tone = this.eventTone
+    let person = this.eventPersonName
+    let relation = this.eventDateRelation
+    let sourceNote = this.eventSourceNote
     this.busy = true
     this.elapsed = 0
     this.hint = EVENT_STAGES[0] + '（0s）'
@@ -432,16 +549,16 @@ struct Index {
       messages: [
         {
           role: 'system',
-          content: '你是历史短文作者。依据给定日期、事件和事实写一段有感染力的中文短文，约350至500字，分成2至4段。先交代这一天发生了什么，再写事情的走向与时代处境，最后以符合给定基调的句子收束。悲剧保持克制，喜事可以明朗；人物生辰可写其后来的人生影响，但不可编造细节。不得虚构引语、统计数字、后续事件或历史人物的心理活动；给定事实不足时宁可写短。不要把AI线索称为已核实史料。只输出正文纯文本。'
+          content: isBirth ? HISTORY_BIRTH_PROMPT : HISTORY_EVENT_PROMPT
         },
         {
           role: 'user',
-          content: `公历日期：${date}\n事件：${title}\n简述：${summary}\n已知事实：${facts}\n情感基调：${tone}\n请据此写一段史事短文。`
+          content: `公历日期：${date}\n类别：${isBirth ? '历史人物诞辰' : '历史事件'}\n日期关系：${relation}\n人物：${person}\n题目：${title}\n简述：${summary}\n可用事实：${facts}\n基调：${tone}\n资料说明：${sourceNote}\n请按本类别的格式写作，尊重史实，避免空泛赞词。`
         }
       ],
-      max_tokens: 6000,
+      max_tokens: 4000,
       temperature: 0.5,
-      reasoning_effort: 'low'
+      reasoning_effort: 'none'
     }
     let client = http.createHttp()
     client.request(DEEPSEEK_URL, {
@@ -458,7 +575,7 @@ struct Index {
       this.stopTimer()
       this.busy = false
       if (resp.responseCode !== 200) {
-        this.hint = '史事写作失败 HTTP ' + resp.responseCode + '；按 = 重试'
+        this.hint = '写作失败 HTTP ' + resp.responseCode + '；按 = 重试'
         return
       }
       try {
@@ -470,13 +587,13 @@ struct Index {
         this.fortuneText = content
         this.hint = ''
       } catch (e) {
-        this.hint = '史事写作结果无法读取；按 = 重试'
+        this.hint = '写作结果无法读取；按 = 重试'
       }
     }).catch((e: Error) => {
       client.destroy()
       this.stopTimer()
       this.busy = false
-      this.hint = '史事写作失败：' + (e.message || '网络不可用') + '；按 = 重试'
+      this.hint = '写作失败：' + (e.message || '网络不可用') + '；按 = 重试'
     })
   }
 
@@ -709,7 +826,7 @@ ${b.summary}${hourNote ? '\n注：' + hourNote : ''}
             .align(Alignment.BottomEnd)
             .margin({ top: 6 })
           } else if (this.route === 'event') {
-            Text(`✦ 史册有载 · ${this.display.slice(0, 4)}-${this.display.slice(4, 6)}-${this.display.slice(6, 8)}`)
+            Text(`✦ ${this.eventKind === 'birth' ? '人物诞辰' : '史册有载'} · ${this.display.slice(0, 4)}-${this.display.slice(4, 6)}-${this.display.slice(6, 8)}`)
               .fontSize(21)
               .fontColor('#FF9F0A')
               .width('100%')
@@ -728,13 +845,14 @@ ${b.summary}${hourNote ? '\n注：' + hourNote : ''}
               .textAlign(TextAlign.End)
               .maxLines(3)
               .margin({ top: 8 })
-            Text(this.hint !== '' ? this.hint : '按 = 写史事全文 · 按 + 改为算命')
+            Text(this.hint !== '' ? this.hint :
+              `按 = ${this.eventKind === 'birth' ? '读人物评传' : '写史事全文'}${this.validFortuneDate(this.display) ? ' · 按 + 改为算命' : ''}`)
               .fontSize(18)
               .fontColor('#FF9F0A')
               .width('100%')
               .textAlign(TextAlign.End)
               .margin({ top: 12 })
-            Text('AI 提供的史事线索，重要事实请核对')
+            Text(this.eventSourceNote)
               .fontSize(14)
               .fontColor('#888888')
               .width('100%')
