@@ -58,7 +58,7 @@ java -jar <SDK>/23/toolchains/lib/hap-sign-tool.jar sign-app \
   -mode localSign \
   -appCertFile <证书链.pem> \
   -profileFile <profile.p7b> \
-  -keystoreFile <OpenHarmony.p12> \
+  -keystoreFile <SDK>/23/toolchains/lib/OpenHarmony.p12 \
   -keystorePwd 123456 -keyPwd 123456 \
   -inFile entry-default-unsigned.hap \
   -outFile entry-default-signed.hap
