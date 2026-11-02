@@ -1,10 +1,11 @@
 {
-  "license": "",
-  "devDependencies": {},
-  "author": "",
+  "modelVersion": "6.0.0",
   "name": "calculator",
+  "version": "1.0.0",
   "description": "Simple calculator for DAYU200",
   "main": "",
-  "version": "1.0.0",
-  "dependencies": {}
+  "author": "",
+  "license": "",
+  "dependencies": {},
+  "devDependencies": {}
 }

@@ -1,0 +1,13 @@
+{
+  "name": "calculator-build-tooling",
+  "version": "1.0.0",
+  "private": true,
+  "description": "hvigor build tooling for the OpenHarmony 6.1.1-LTS (API 23) calculator project",
+  "engines": {
+    "node": ">=24.14.1"
+  },
+  "devDependencies": {
+    "@ohos/hvigor": "6.26.9",
+    "@ohos/hvigor-ohos-plugin": "6.26.9"
+  }
+}

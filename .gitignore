@@ -1,9 +1,12 @@
 entry/build/
 .hvigor/
 oh_modules/
+node_modules/
 .idea/
 *.jpeg
 *.png
+!AppScope/resources/base/media/*.png
+!entry/src/main/resources/base/media/*.png
 *.hap
 dbg.json
 lay*.json

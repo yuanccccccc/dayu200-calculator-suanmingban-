@@ -392,8 +392,8 @@ ${b.summary}
         // 按键区（纯计算器，无任何算命入口）
         Column({ space: 12 }) {
           Row({ space: 12 }) {
-            this.btn('C', '#A5A5A5', () => this.clearAll())
-            this.btn('←', '#A5A5A5', () => this.backspace())
+            this.btn('C', '#A5A5A5', () => { this.clearAll() })
+            this.btn('←', '#A5A5A5', () => { this.backspace() })
             this.btn('%', '#A5A5A5', () => {
               if (this.busy || this.fullView) return
               // 输入 8 位以上纯数字（疑似在敲隐藏模式）-> 切换乾造/坤造
@@ -405,30 +405,30 @@ ${b.summary}
               let r = this.current() / 100
               this.display = this.format(r)
             })
-            this.btn('÷', '#FF9F0A', () => this.setOp('÷'))
+            this.btn('÷', '#FF9F0A', () => { this.setOp('÷') })
           }
           Row({ space: 12 }) {
-            this.btn('7', '#333333', () => this.inputDigit('7'))
-            this.btn('8', '#333333', () => this.inputDigit('8'))
-            this.btn('9', '#333333', () => this.inputDigit('9'))
-            this.btn('×', '#FF9F0A', () => this.setOp('×'))
+            this.btn('7', '#333333', () => { this.inputDigit('7') })
+            this.btn('8', '#333333', () => { this.inputDigit('8') })
+            this.btn('9', '#333333', () => { this.inputDigit('9') })
+            this.btn('×', '#FF9F0A', () => { this.setOp('×') })
           }
           Row({ space: 12 }) {
-            this.btn('4', '#333333', () => this.inputDigit('4'))
-            this.btn('5', '#333333', () => this.inputDigit('5'))
-            this.btn('6', '#333333', () => this.inputDigit('6'))
-            this.btn('-', '#FF9F0A', () => this.setOp('-'))
+            this.btn('4', '#333333', () => { this.inputDigit('4') })
+            this.btn('5', '#333333', () => { this.inputDigit('5') })
+            this.btn('6', '#333333', () => { this.inputDigit('6') })
+            this.btn('-', '#FF9F0A', () => { this.setOp('-') })
           }
           Row({ space: 12 }) {
-            this.btn('1', '#333333', () => this.inputDigit('1'))
-            this.btn('2', '#333333', () => this.inputDigit('2'))
-            this.btn('3', '#333333', () => this.inputDigit('3'))
-            this.btn('+', '#FF9F0A', () => this.setOp('+'))
+            this.btn('1', '#333333', () => { this.inputDigit('1') })
+            this.btn('2', '#333333', () => { this.inputDigit('2') })
+            this.btn('3', '#333333', () => { this.inputDigit('3') })
+            this.btn('+', '#FF9F0A', () => { this.setOp('+') })
           }
           Row({ space: 12 }) {
-            this.btn('0', '#333333', () => this.inputDigit('0'))
-            this.btn('.', '#333333', () => this.inputDot())
-            this.btn('=', '#FF9F0A', () => this.equals())
+            this.btn('0', '#333333', () => { this.inputDigit('0') })
+            this.btn('.', '#333333', () => { this.inputDot() })
+            this.btn('=', '#FF9F0A', () => { this.equals() })
           }
         }
         .width('100%')

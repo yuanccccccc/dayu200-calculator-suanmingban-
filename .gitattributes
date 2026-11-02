@@ -1,0 +1,4 @@
+# hvigorw is a bash script: it must keep LF line endings even on Windows checkouts
+hvigorw text eol=lf
+*.sh text eol=lf
+*.bat text eol=crlf
